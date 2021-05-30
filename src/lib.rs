@@ -8,18 +8,23 @@ use std::str::FromStr;
 type KeyLen = generic_array::typenum::U32;
 type NonceLen = generic_array::typenum::U12;
 
+/// Clear text message from a sender, ideally the sender's identity would be ensured through
+/// cryptographic means, for now it's only a string attached to the message.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Message {
     pub sender: String,
     pub msg: String,
 }
 
+/// Message encrypted to a key defining a chat room. Every message encrypted by the same key will
+/// appear to all participants who joined the room with that pre shared key.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EncryptedMessage {
     nonce: Nonce<NonceLen>,
     data: Vec<u8>,
 }
 
+/// Pre shared key defining a chat room
 pub struct Key {
     key: AesKey<KeyLen>,
 }

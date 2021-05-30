@@ -9,23 +9,30 @@ use tokio::time::Duration;
 use tokio_tungstenite::connect_async;
 use tuirealm::tui::widgets::canvas::Context;
 
+// Command line options
 #[derive(StructOpt)]
 struct Options {
+    // Nym client to use
     #[structopt(short, long, default_value = "ws://127.0.0.1:1977")]
     websocket: String,
+    // The server's Nym address
     #[structopt(
     short,
     long,
     parse(try_from_str = Recipient::try_from_base58_string),
     )]
     service_provider: Recipient,
+    // The server's HTTP server to query the messages from
     url: String,
+    // The key defining the chatroom (32 bytes hex encoded)
     room: Key,
+    // Our name to be attached to messages
     name: String,
 }
 
 #[tokio::main]
 async fn main() {
+    // Parse command line arguments
     let opts: Options = StructOpt::from_args();
     let Options {
         websocket,
@@ -35,20 +42,31 @@ async fn main() {
         name,
     } = opts;
 
+    // Connect to Nym native client
     let (mut ws, _) = connect_async(&websocket)
         .await
         .expect("Couldn't connect to nym websocket");
 
+    // Channels to communicate with the UI: the UI can send outgoing message to our main thread
+    // and we will encapsulate and encrypt them correctly and it can receive messages that the main
+    // thread received and could decrypt. This makes the UI mostly decoupled from the rest of the
+    // application.
     let (incoming_send, incoming_receive) = tokio::sync::mpsc::channel::<Message>(16);
     let (outgoing_send, mut outgoing_receive) = tokio::sync::mpsc::channel::<String>(16);
 
+    // Spawn the UI thread, I view this as a blackbox since UI stuff is weird and it is mostly
+    // just copy+pasted code.
     let mut ui = tokio::task::spawn_blocking(|| ui::run_ui(incoming_receive, outgoing_send));
 
+    // Start a timer that will wake up the main thread once a second to fetch messages from the server
     let mut fetch_timer = tokio::time::interval(Duration::from_secs(1));
+    // Last message fetched from the server, so we only fetch the new ones next time
     let mut last_fetch = 0;
 
+    // Run forever and wait for one of the following events to happen:
     loop {
         select! {
+            // The UI thread sent a message, we have to encrypt it and send it via the Nym client
             Some(msg) = outgoing_receive.recv() => {
                 let msg = Message::new(name.clone(), msg);
                 let enc_msg = msg.encrypt(&room);
@@ -61,6 +79,8 @@ async fn main() {
                     .await
                     .expect("couldn't send request");
             },
+            // The fetch timer woke us up, we have to fetch new messages from the server and send
+            // the ones we could decrypt to the UI thread.
             _ = fetch_timer.tick() => {
                 let msgs = fetch_messages(&url, last_fetch).await;
                 last_fetch += msgs.len();
@@ -70,12 +90,14 @@ async fn main() {
                     }
                 }
             },
+            // The UI thread exited, we exit the infinite loop to stop the application
             _ = &mut ui => {
                 break;
             }
         }
     }
 
+    // Gracefully disconnect from the Nym native client
     ws.close(None).await.expect("Failed to close websocket.");
 }
 
@@ -91,12 +113,7 @@ async fn fetch_messages(base_url: &str, last_seen: usize) -> Vec<EncryptedMessag
         .unwrap()
 }
 
-struct Model {
-    quit: bool,
-    redraw: bool,
-    last_redraw: Instant,
-}
-
+// Black magic
 pub mod ui {
     use nym_chat::Message;
     use tokio::sync::mpsc::{Receiver, Sender};
